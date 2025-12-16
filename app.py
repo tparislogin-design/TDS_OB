@@ -1,111 +1,87 @@
 import streamlit as st
 import pandas as pd
-from ortools.sat.python import cp_model
+import numpy as np
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="ATC Rostering", layout="wide")
+# Configuration large pour ressembler à l'écran TDS
+st.set_page_config(page_title="TDS Manager - IA", layout="wide")
 
-st.title("🧩 ATC Rostering - Générateur de Planning Mensuel")
+# --- CSS PERSONNALISÉ (Pour imiter le style "Pro") ---
+st.markdown("""
+    <style>
+    .block-container {padding-top: 1rem; padding-bottom: 0rem;}
+    h1 {font-size: 1.5rem; margin-bottom: 0;}
+    div[data-testid="stMetricValue"] {font-size: 1.2rem;}
+    </style>
+""", unsafe_allow_html=True)
 
-# --- 1. CONFIGURATION (D'après ton Image 1 & 2) ---
-with st.sidebar:
-    st.header("⚙️ Paramètres Généraux")
-    max_consecutifs = st.number_input("Max jours consécutifs", value=4)
-    repos_min_heures = st.number_input("Repos Min (heures)", value=11)
+# Titre et Menu comme sur ton image
+col_titre, col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([4, 1, 1, 1, 1])
+with col_titre:
+    st.title("✈️ TDS Manager (Moteur IA)")
+with col_btn1:
+    st.button("📅 Planning", use_container_width=True, type="primary")
+with col_btn2:
+    st.button("⚙️ Config", use_container_width=True)
+with col_btn3:
+    st.button("📋 Désidérata", use_container_width=True)
+with col_btn4:
+    st.button("📊 Bilan", use_container_width=True)
+
+st.divider()
+
+# --- 1. PARAMÈTRES (Barre du haut sur ton image) ---
+c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+with c1:
+    mois_select = st.selectbox("Période", ["Janvier 2026", "Février 2026"])
+with c2:
+    st.info("⚠️ 2 Violations détectées") # Fake pour l'exemple
+with c3:
+    zoom = st.slider("Zoom", 50, 150, 100, label_visibility="collapsed")
+with c4:
+    st.download_button("⬇️ Export Excel", "data", file_name="planning.xlsx", use_container_width=True)
+
+# --- 2. DONNÉES SIMULÉES (Pour reproduire la structure) ---
+agents = ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN", "TRT", "CLO"]
+jours = [f"{i}/01" for i in range(1, 15)] # 14 premiers jours
+jours_semaine = ["LU", "MA", "ME", "JE", "VE", "SA", "DI"] * 2
+
+# Création d'une structure vide
+data = { "CONTRÔLEUR": [f"{a} (0/12)" for a in agents] }
+
+# Remplissage aléatoire pour l'effet visuel (Simule le résultat de l'IA)
+codes_possibles = ["M", "J1", "J2", "J3", "A1", "S", "", ""] # "" = Repos
+for i, jour in enumerate(jours):
+    nom_col = f"{jours_semaine[i]} {jour}"
+    col_valeurs = []
+    for _ in agents:
+        val = np.random.choice(codes_possibles)
+        col_valeurs.append(val)
+    data[nom_col] = col_valeurs
+
+df = pd.DataFrame(data)
+df.set_index("CONTRÔLEUR", inplace=True)
+
+# --- 3. AFFICHAGE STYLE (Couleurs comme sur ton image) ---
+def color_sur_tours(val):
+    color = 'white'
+    font_weight = 'normal'
     
-    st.header("🕒 Définition des Vacations")
-    # On reproduit ton tableau de vacations (Image 2)
-    data_vacations = [
-        {"Code": "M", "Début": "05:45", "Fin": "12:45"},
-        {"Code": "J1", "Début": "07:30", "Fin": "15:30"},
-        {"Code": "J2", "Début": "08:00", "Fin": "16:00"},
-        {"Code": "J3", "Début": "09:30", "Fin": "18:30"},
-        {"Code": "A1", "Début": "13:00", "Fin": "22:00"},
-        {"Code": "A2", "Début": "15:00", "Fin": "23:00"},
-        {"Code": "S",  "Début": "16:45", "Fin": "23:30"},
-        {"Code": "OFF", "Début": "00:00", "Fin": "00:00"} # Repos
-    ]
-    df_vacs = pd.DataFrame(data_vacations)
-    st.dataframe(df_vacs, hide_index=True)
-
-# --- 2. DONNÉES AGENTS (D'après ton Image 3) ---
-col_param, col_main = st.columns([1, 3])
-
-with col_param:
-    st.subheader("👥 Agents")
-    # Liste simplifiée basée sur ton image
-    agents_list = ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN"]
-    selected_agents = st.multiselect("Sélectionner les agents", agents_list, default=agents_list)
-    
-    nb_jours = st.slider("Durée du planning (jours)", 7, 31, 7)
-
-# --- 3. LE MOTEUR IA (Simulation OR-Tools) ---
-if st.button("🚀 Lancer le calcul du Planning"):
-    model = cp_model.CpModel()
-    
-    # Variables : planning[(agent, jour)] = code_vacation
-    # Pour simplifier l'exemple, on associe chaque vacation à un entier (0=M, 1=J1, etc.)
-    vacation_codes = df_vacs['Code'].tolist()
-    map_vacation_int = {v: i for i, v in enumerate(vacation_codes)}
-    
-    shifts = {}
-    for agent in selected_agents:
-        for j in range(nb_jours):
-            shifts[(agent, j)] = model.NewIntVar(0, len(vacation_codes)-1, f'shift_{agent}_{j}')
-
-    # --- EXEMPLE DE CONTRAINTE : MAX CONSECUTIFS (Image 1) ---
-    # Si un agent travaille, ce n'est pas "OFF". Supposons que "OFF" est le dernier code.
-    idx_off = len(vacation_codes) - 1 
-    
-    for agent in selected_agents:
-        for j in range(nb_jours - max_consecutifs):
-            # On crée une liste de booléens : Est-ce qu'il travaille au jour j+k ?
-            travaille_sequence = []
-            for k in range(max_consecutifs + 1):
-                is_working = model.NewBoolVar(f'working_{agent}_{j+k}')
-                # Si shift != OFF, alors is_working = True
-                model.Add(shifts[(agent, j+k)] != idx_off).OnlyEnforceIf(is_working)
-                model.Add(shifts[(agent, j+k)] == idx_off).OnlyEnforceIf(is_working.Not())
-                travaille_sequence.append(is_working)
-            
-            # La somme des jours travaillés sur une fenêtre de (Max+1) ne peut pas être égale à (Max+1)
-            # Autrement dit : il faut au moins un repos dans le lot
-            model.Add(sum(travaille_sequence) <= max_consecutifs)
-
-    # --- RÉSOLUTION ---
-    solver = cp_model.CpSolver()
-    status = solver.Solve(model)
-
-    if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        st.success("✅ Solution trouvée !")
+    if val == 'M': 
+        color = '#ffeba0' # Jaune
+        font_weight = 'bold'
+    elif val in ['J1', 'J2', 'J3']: 
+        color = '#d4edda' # Vert pâle
+    elif val in ['A1', 'A2']: 
+        color = '#cce5ff' # Bleu pâle
+    elif val == 'S': 
+        color = '#f8d7da' # Rouge pâle
         
-        # Préparation des données pour affichage
-        res_data = []
-        for agent in selected_agents:
-            row = {"Agent": agent}
-            total_services = 0
-            for j in range(nb_jours):
-                code_idx = solver.Value(shifts[(agent, j)])
-                code_str = vacation_codes[code_idx]
-                row[f"J{j+1}"] = code_str
-                if code_str != "OFF":
-                    total_services += 1
-            row["Total"] = total_services # Pour reproduire ton compteur 0/12
-            res_data.append(row)
-            
-        df_result = pd.DataFrame(res_data)
-        
-        # Affichage avec mise en forme conditionnelle
-        def color_coding(val):
-            if val == 'OFF': return 'background-color: #f0f2f6; color: #bcccdc'
-            if val == 'M': return 'background-color: #ffeba0' # Jaune matin
-            if val == 'S': return 'background-color: #ffcccb' # Rouge soir
-            if val in ['J1', 'J2', 'J3']: return 'background-color: #90ee90' # Vert jour
-            return ''
+    return f'background-color: {color}; color: black; font-weight: {font_weight}; text-align: center; border: 1px solid #eee'
 
-        st.dataframe(df_result.style.map(color_coding), use_container_width=True)
-        
-    else:
-        st.error("❌ Pas de solution possible avec ces contraintes. Essaie d'assouplir les règles.")
+# Affichage de la grille principale
+st.subheader("Grille Principale")
+st.dataframe(df.style.map(color_sur_tours), height=500, use_container_width=True)
 
-else:
-    st.info("Clique sur le bouton pour générer un planning test.")
+# Note de bas de page
+st.caption("Clic Gauche : Verrouiller | Clic Droit : Refuser (Fonctionnalités à venir avec AgGrid)")
