@@ -1,131 +1,161 @@
 import streamlit as st
 import pandas as pd
+from datetime import date, timedelta
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+from ortools.sat.python import cp_model
 
-# --- CONFIGURATION DE LA PAGE ---
-st.set_page_config(page_title="TDS Manager Pro", layout="wide", initial_sidebar_state="collapsed")
+# --- CONFIGURATION DE LA PAGE (LARGE ET PROPRE) ---
+st.set_page_config(page_title="TDS Planner IA", layout="wide", initial_sidebar_state="collapsed")
 
-# --- CSS POUR UN RENDU "APPLICATION BUREAU" ---
+# --- CSS POUR AMÉLIORER LA LISIBILITÉ ---
 st.markdown("""
     <style>
-    .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 98% !important;}
-    h1 {font-size: 1.5rem; color: #2c3e50;}
-    .stButton button {width: 100%; border-radius: 4px;}
+    .block-container {padding-top: 1.5rem; padding-bottom: 2rem; max-width: 98%;}
+    h1 {font-size: 1.8rem; color: #1e3a8a;}
+    .stButton button {background-color: #1e3a8a; color: white; border-radius: 5px; font-weight: bold;}
+    .st-emotion-cache-1kyc28m {justify-content: center;} /* Centre les en-têtes de colonnes */
     </style>
 """, unsafe_allow_html=True)
 
-# --- EN-TÊTE ---
-c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
-with c1:
-    st.title("✈️ TDS Manager | Planning Interactif")
-with c2:
-    st.metric("Contrôleurs", "14 Présents")
-with c3:
-    st.metric("Alertes", "0", delta_color="normal")
-with c4:
-    if st.button("💾 Sauvegarder"):
-        st.toast("Planning sauvegardé avec succès !", icon="✅")
-
-st.divider()
-
-# --- GÉNÉRATION DES DONNÉES (Simulation Structure Matrice) ---
-# Dans la vraie version, ceci viendra de Google Sheets ou de l'IA Or-Tools
-def get_data():
-    agents = ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN", "TRT", "CLO", "FRD", "DAZ", "GNC", "DTY", "JCT"]
-    dates = [f"{i:02d}/01" for i in range(1, 32)] # 31 jours
-    jours_sem = ["LU", "MA", "ME", "JE", "VE", "SA", "DI"] * 5
-    
-    rows = []
-    for agent in agents:
-        row = {"Agent": agent, "Solde": 0, "Objectif": 12}
-        for i, d in enumerate(dates):
-            col_name = f"{d}\n{jours_sem[i]}" # Saut de ligne dans l'en-tête
-            # Remplissage par défaut vide
-            row[col_name] = "" 
-        rows.append(row)
-    
-    # Ajoutons quelques données pour l'exemple visuel
-    df = pd.DataFrame(rows)
-    # Simulation de quelques vacations
-    cols = df.columns[3:] # On saute Agent, Solde, Objectif
-    df.loc[0, cols[0]] = "M"   # GAO Matin le 1er
-    df.loc[1, cols[0]] = "J1"  # WBR Jour le 1er
-    df.loc[2, cols[0]] = "S"   # PLC Soir le 1er
-    return df
-
-df = get_data()
-
-# --- CONFIGURATION AVANCÉE AG-GRID (Le coeur du rendu Pro) ---
-gb = GridOptionsBuilder.from_dataframe(df)
-
-# 1. Figer les colonnes de gauche (Noms + Compteurs)
-gb.configure_column("Agent", pinned="left", width=100, cellStyle={'fontWeight': 'bold'})
-gb.configure_column("Solde", pinned="left", width=70)
-gb.configure_column("Objectif", pinned="left", width=80)
-
-# 2. Javascript pour la coloration conditionnelle (Performance Max)
-# C'est ce script qui tourne dans le navigateur pour colorier instantanément
-cellStyleJS = JsCode("""
-function(params) {
-    if (params.value == 'M') {
-        return {'backgroundColor': '#ffeebb', 'color': 'black', 'textAlign': 'center', 'fontWeight': 'bold'};
-    }
-    if (params.value == 'J1' || params.value == 'J2' || params.value == 'J3') {
-        return {'backgroundColor': '#d4edda', 'color': 'black', 'textAlign': 'center'};
-    }
-    if (params.value == 'A1' || params.value == 'A2') {
-        return {'backgroundColor': '#cce5ff', 'color': 'black', 'textAlign': 'center'};
-    }
-    if (params.value == 'S') {
-        return {'backgroundColor': '#f8d7da', 'color': '#721c24', 'textAlign': 'center', 'fontWeight': 'bold'};
-    }
-    if (params.value == 'OFF') {
-        return {'backgroundColor': '#eeeeee', 'color': '#aaa', 'textAlign': 'center'};
-    }
-    return {'textAlign': 'center'};
+# --- DONNÉES DE BASE (VACATIONS) ---
+VACATIONS = {
+    'M': {'start': '05:45', 'end': '12:45', 'color': '#fef08a'}, # Jaune clair
+    'J1': {'start': '07:30', 'end': '15:30', 'color': '#bbf7d0'}, # Vert clair
+    'J2': {'start': '08:00', 'end': '16:00', 'color': '#bbf7d0'},
+    'J3': {'start': '09:30', 'end': '18:30', 'color': '#bbf7d0'},
+    'A1': {'start': '13:00', 'end': '22:00', 'color': '#bfdbfe'}, # Bleu clair
+    'A2': {'start': '15:00', 'end': '23:00', 'color': '#bfdbfe'},
+    'S': {'start': '16:45', 'end': '23:30', 'color': '#fecaca'}, # Rouge clair
+    'OFF': {'start': '00:00', 'end': '00:00', 'color': '#f1f5f9'} # Gris très clair
 }
-""")
+CODES_TRAVAIL = [k for k in VACATIONS if k != 'OFF']
 
-# 3. Appliquer le style et l'édition sur toutes les colonnes de dates
-date_cols = df.columns[3:] # Toutes les colonnes sauf les 3 premières
-for col in date_cols:
-    gb.configure_column(col, 
-                        width=60, 
-                        editable=True, # Rend la cellule modifiable !
-                        cellStyle=cellStyleJS)
+# --- FONCTION D'OPTIMISATION (LE MOTEUR IA) ---
+def run_optimization(agents, nb_jours, couverture_min, max_consecutifs):
+    model = cp_model.CpModel()
+    
+    # 1. Variables : planning[agent][jour] = index de la vacation
+    vacation_list = list(VACATIONS.keys())
+    shifts = {}
+    for agent in agents:
+        for j in range(nb_jours):
+            shifts[(agent, j)] = model.NewIntVar(0, len(vacation_list) - 1, f'shift_{agent}_{j}')
 
-# 4. Options globales de la grille
-gb.configure_grid_options(rowHeight=35) # Hauteur de ligne confortable
-gb.configure_selection('single') # Sélection simple
+    # 2. Contraintes
+    # A. Couverture minimale : chaque jour, il doit y avoir au moins X personnes qui travaillent
+    idx_off = vacation_list.index('OFF')
+    for j in range(nb_jours):
+        travaillent_ce_jour = [model.NewBoolVar(f'work_{a}_{j}') for a in agents]
+        for i, agent in enumerate(agents):
+            model.Add(shifts[(agent, j)] != idx_off).OnlyEnforceIf(travaillent_ce_jour[i])
+            model.Add(shifts[(agent, j)] == idx_off).OnlyEnforceIf(travaillent_ce_jour[i].Not())
+        model.Add(sum(travaillent_ce_jour) >= couverture_min)
 
-gridOptions = gb.build()
+    # B. Max jours de travail consécutifs
+    for agent in agents:
+        for j in range(nb_jours - max_consecutifs):
+            model.Add(sum(shifts[(agent, j + k)] != idx_off for k in range(max_consecutifs + 1)) <= max_consecutifs)
 
-# --- AFFICHAGE DE LA GRILLE ---
-st.caption("Double-cliquez sur une case pour modifier (M, J1, S, A1...). Les couleurs changent automatiquement.")
+    # 3. Résolution
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 15.0 # Temps limite
+    status = solver.Solve(model)
 
-grid_response = AgGrid(
-    df,
-    gridOptions=gridOptions,
-    allow_unsafe_jscode=True, # Nécessaire pour les couleurs JS
-    enable_enterprise_modules=False,
-    height=600, 
-    width='100%',
-    theme="balham", # Thème très compact et pro (style Excel)
-    update_mode=GridUpdateMode.VALUE_CHANGED
-)
+    if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
+        rows = []
+        for agent in agents:
+            row = {"Agent": agent, "Solde": 0}
+            for j in range(nb_jours):
+                code_idx = solver.Value(shifts[(agent, j)])
+                row[f"J{j+1}"] = vacation_list[code_idx]
+            rows.append(row)
+        return pd.DataFrame(rows)
+    else:
+        return None
 
-# --- TABLEAU DE BORD EN TEMPS RÉEL (Bas de page) ---
-# On récupère les données modifiées par l'utilisateur
-df_modifie = grid_response['data']
+# --- INTERFACE UTILISATEUR ---
+st.title("✈️ TDS Planner IA")
+st.markdown("---")
 
-st.divider()
-c1, c2 = st.columns(2)
-with c1:
-    st.subheader("📊 Statistiques en direct")
-    # Calcul simple d'exemple : compter combien de 'M' (Matins) sont posés
-    total_matins = df_modifie.apply(lambda x: x.str.count('M') if x.dtype == "object" else 0, axis=1).sum().sum()
-    st.info(f"Nombre total de vacations MATIN (M) : {int(total_matins)}")
+# Layout à deux colonnes : Panneau de contrôle à gauche, Planning à droite
+col_controles, col_planning = st.columns([1, 4])
 
-with c2:
-    st.subheader("🛠️ Actions Rapides")
-    st.button("Vérifier la conformité (Légalités)", type="secondary")
+with col_controles:
+    st.header("Panneau de Contrôle")
+    
+    agents_list = ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN", "TRT", "CLO", "FRD"]
+    nb_jours = st.slider("Jours à planifier", 7, 31, 14)
+    
+    st.subheader("Contraintes de l'IA")
+    couverture_min = st.slider("Couverture minimale (agents/jour)", 1, len(agents_list), 5)
+    max_consecutifs = st.slider("Max jours de travail consécutifs", 3, 7, 5)
+
+    if st.button("🚀 Lancer l'Optimisation", use_container_width=True):
+        with st.spinner("L'IA calcule le meilleur planning..."):
+            result_df = run_optimization(agents_list, nb_jours, couverture_min, max_consecutifs)
+            if result_df is not None:
+                st.session_state.planning_df = result_df # Sauvegarde du résultat
+                st.success("Planning généré avec succès !")
+            else:
+                st.error("Aucune solution trouvée. Essayez d'assouplir les contraintes.")
+
+# Initialisation du DataFrame dans l'état de la session
+if 'planning_df' not in st.session_state:
+    st.session_state.planning_df = pd.DataFrame(columns=["Agent", "Solde"] + [f"J{i+1}" for i in range(14)])
+
+with col_planning:
+    st.header("🗓️ Grille de Planning")
+    
+    # --- CONFIGURATION AG-GRID (LISIBILITÉ AMÉLIORÉE) ---
+    df_display = st.session_state.planning_df.copy()
+    
+    # Renommer les colonnes pour afficher Date + Jour
+    start_date = date(2026, 1, 1)
+    new_cols = {}
+    for i, col in enumerate(df_display.columns):
+        if col.startswith("J"):
+            current_date = start_date + timedelta(days=i-2)
+            day_name = current_date.strftime("%a").upper()[:2]
+            new_cols[col] = f"{current_date.day:02d}/{current_date.month:02d}\n{day_name}"
+    df_display.rename(columns=new_cols, inplace=True)
+
+    gb = GridOptionsBuilder.from_dataframe(df_display)
+    
+    # JS pour coloration dynamique et mise en évidence des week-ends
+    cellStyleJS = JsCode(f"""
+    function(params) {{
+        // Style de base
+        let style = {{'textAlign': 'center', 'borderRight': '1px solid #eee'}};
+
+        // Mise en évidence des week-ends
+        if (params.colDef.headerName.includes('SA') || params.colDef.headerName.includes('DI')) {{
+            style.backgroundColor = '#f8fafc'; // Gris très léger pour le fond du week-end
+        }}
+        
+        // Coloration par code vacation
+        const colors = { {k: v['color'] for k, v in VACATIONS.items()} };
+        if (colors[params.value]) {{
+            style.backgroundColor = colors[params.value];
+            style.fontWeight = 'bold';
+            style.color = '#334155'; // Texte sombre pour le contraste
+        }}
+        
+        return style;
+    }}
+    """)
+
+    gb.configure_columns(df_display.columns[2:], cellStyle=cellStyleJS, editable=True, width=70)
+    gb.configure_column("Agent", pinned="left", width=100, cellStyle={'fontWeight': 'bold'})
+    gb.configure_column("Solde", pinned="left", width=70)
+    
+    gb.configure_grid_options(rowHeight=40, headerHeight=50)
+    gridOptions = gb.build()
+
+    AgGrid(
+        df_display,
+        gridOptions=gridOptions,
+        allow_unsafe_jscode=True,
+        theme="alpine", # Thème plus aéré et moderne
+        height=600,
+        enable_enterprise_modules=False
+    )
