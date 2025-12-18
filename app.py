@@ -58,14 +58,22 @@ if st.button("🚀 LANCER L'OPTIMISATION (Moteur V8.8)", type="primary", use_con
             st.error("Impossible de trouver une solution avec ces contraintes (Infaisable).")
 
 # --- AFFICHAGE RÉSULTAT ---
+# --- DANS app.py ---
+
 if 'df_planning' in st.session_state:
     df = st.session_state['df_planning']
+    
+    # --- CORRECTION CRITIQUE ICI ---
+    # On convertit tous les noms de colonnes en chaînes de caractères (String)
+    # Sinon AgGrid plante avec l'erreur "e.includes is not a function" sur les nombres
+    df.columns = df.columns.astype(str)
+    # -------------------------------
     
     # Préparation AgGrid
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_column("Agent", pinned="left", width=120, cellStyle={'fontWeight': 'bold'})
     
-    # Javascript pour les couleurs (reprise de ton code)
+    # Javascript pour les couleurs
     cells_js = JsCode("""
     function(params) {
         if (params.value == 'M') return {'backgroundColor': '#ffeebb', 'color': 'black', 'textAlign': 'center', 'fontWeight': 'bold'};
@@ -73,6 +81,7 @@ if 'df_planning' in st.session_state:
         if (params.value == 'A1' || params.value == 'A2') return {'backgroundColor': '#cce5ff', 'color': 'black', 'textAlign': 'center'};
         if (params.value == 'S') return {'backgroundColor': '#f8d7da', 'color': '#721c24', 'textAlign': 'center', 'fontWeight': 'bold'};
         if (params.value == 'OFF') return {'backgroundColor': '#f0f2f6', 'color': '#ccc', 'textAlign': 'center'};
+        if (params.value == 'C') return {'backgroundColor': '#ffffff', 'color': '#aaa', 'textAlign': 'center', 'fontStyle': 'italic'};
         return {'textAlign': 'center'};
     }
     """)
@@ -80,9 +89,13 @@ if 'df_planning' in st.session_state:
     # Configurer les colonnes de jours
     cols_jours = [c for c in df.columns if c != 'Agent']
     for col in cols_jours:
-        # Essayer de formater la date en entête
-        dt = solver.get_datetime_from_day_num(annee_select, int(col))
-        label = f"{dt.strftime('%d/%m')} (J{col})" if dt else str(col)
+        # col est maintenant un str, mais on le convertit en int pour l'affichage de la date
+        try:
+            day_num = int(col)
+            dt = solver.get_datetime_from_day_num(annee_select, day_num)
+            label = f"{dt.strftime('%d/%m')} (J{col})" if dt else col
+        except:
+            label = col # Si ce n'est pas un nombre, on garde le texte
         
         gb.configure_column(col, headerName=label, width=85, cellStyle=cells_js, editable=True)
 
