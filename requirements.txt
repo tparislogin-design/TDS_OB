@@ -2,3 +2,6 @@ streamlit
 pandas
 ortools
 streamlit-aggrid
+gspread
+google-auth
+openpyxl
