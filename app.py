@@ -1,154 +1,96 @@
 import streamlit as st
 import pandas as pd
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
-from ortools.sat.python import cp_model
+import config as cfg
+import solver
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="TDS Manager IA", layout="wide")
+st.set_page_config(page_title="TDS Manager V8.8", layout="wide")
 
-# --- STYLE CSS POUR LA LISIBILITÉ ---
+# --- CSS ---
 st.markdown("""
-    <style>
-    .stApp { background-color: #f8f9fa; }
-    .main-title { color: #1e3a8a; font-weight: 800; font-size: 2rem; }
-    .status-box { padding: 10px; border-radius: 5px; background: white; border: 1px solid #ddd; }
-    </style>
+<style>
+    .block-container {padding-top: 1rem;}
+    h1 {color: #1e3a8a;}
+</style>
 """, unsafe_allow_html=True)
 
-# --- FONCTION D'OPTIMISATION (IA) ---
-def optimiser_planning(agents, nb_jours, vacations):
-    model = cp_model.CpModel()
+# --- SIDEBAR : PARAMÈTRES ---
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/984/984233.png", width=50)
+    st.title("Paramètres V8.8")
     
-    # Variables : planning[agent, jour, vacation]
-    v_codes = [v['Code'] for v in vacations]
-    v_map = {i: v for i, v in enumerate(v_codes)}
+    annee_select = st.number_input("Année", value=cfg.ANNEE)
     
-    assign = {}
-    for a in agents:
-        for j in range(nb_jours):
-            for v_idx in range(len(v_codes)):
-                assign[(a, j, v_idx)] = model.NewBoolVar(f'a{a}_j{j}_v{v_idx}')
-
-    # CONTRAINTES
-    # 1. Un seul service (ou repos) par jour par agent
-    for a in agents:
-        for j in range(nb_jours):
-            model.AddExactlyOne(assign[(a, j, v_idx)] for v_idx in range(len(v_codes)))
-
-    # 2. Couverture minimale : Au moins 1 agent sur M, J1 et S chaque jour
-    # (On identifie les index de M, J1 et S)
-    idx_M = v_codes.index('M')
-    idx_J = v_codes.index('J1')
-    idx_S = v_codes.index('S')
+    col_d, col_f = st.columns(2)
+    with col_d:
+        jour_debut = st.number_input("Jour Début", value=335, min_value=1, max_value=365)
+    with col_f:
+        jour_fin = st.number_input("Jour Fin", value=348, min_value=1, max_value=365)
+        
+    st.divider()
     
-    for j in range(nb_jours):
-        model.Add(sum(assign[(a, j, idx_M)] for a in agents) >= 1)
-        model.Add(sum(assign[(a, j, idx_J)] for a in agents) >= 1)
-        model.Add(sum(assign[(a, j, idx_S)] for a in agents) >= 1)
-
-    # 3. Équité : Pas plus de 5 services par semaine par agent
-    for a in agents:
-        model.Add(sum(assign[(a, j, v)] for j in range(nb_jours) for v in range(len(v_codes)-1)) <= 15)
-
-    # Résolution
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 5.0
-    status = solver.Solve(model)
-
-    if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        # On reconstruit le tableau
-        res = []
-        for a in agents:
-            row = {"Agent": a}
-            for j in range(nb_jours):
-                for v_idx in range(len(v_codes)):
-                    if solver.Value(assign[(a, j, v_idx)]):
-                        row[j] = v_codes[v_idx]
-            res.append(row)
-        return pd.DataFrame(res)
-    return None
-
-# --- INTERFACE UTILISATEUR ---
-
-st.markdown('<p class="main-title">✈️ TDS Manager : Planification Assistée par IA</p>', unsafe_allow_html=True)
-
-# Barre d'actions
-col_actions, col_status = st.columns([2, 1])
-with col_actions:
-    if st.button("🚀 LANCER L'OPTIMISATION IA", type="primary", use_container_width=True):
-        with st.spinner("L'IA calcule la meilleure répartition..."):
-            agents = ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN", "TRT", "CLO", "FRD"]
-            vacs = [{"Code": "M"}, {"Code": "J1"}, {"Code": "A1"}, {"Code": "S"}, {"Code": "OFF"}]
-            df_opti = optimiser_planning(agents, 14, vacs)
-            if df_opti is not None:
-                st.session_state['df_planning'] = df_opti
-                st.success("Planning optimisé généré !")
-            else:
-                st.error("Impossible de trouver une solution avec ces contraintes.")
-
-# Initialisation des données si vide
-if 'df_planning' not in st.session_state:
-    # Création d'un tableau vide par défaut
-    agents = ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN", "TRT", "CLO", "FRD"]
-    st.session_state['df_planning'] = pd.DataFrame([{"Agent": a, **{j: "OFF" for j in range(14)}} for a in agents])
-
-# --- PRÉPARATION DE LA GRILLE AG-GRID ---
-df = st.session_state['df_planning']
-gb = GridOptionsBuilder.from_dataframe(df)
-
-# JS pour la coloration et la lisibilité
-# Ajout de la logique de couleur pour les colonnes (Weekend = Gris)
-cell_style_jscode = JsCode("""
-function(params) {
-    // Couleurs des vacations
-    if (params.value === 'M') return {'backgroundColor': '#FEF3C7', 'color': '#92400E', 'fontWeight': 'bold', 'textAlign': 'center'};
-    if (params.value === 'S') return {'backgroundColor': '#FEE2E2', 'color': '#991B1B', 'fontWeight': 'bold', 'textAlign': 'center'};
-    if (params.value === 'J1' || params.value === 'A1') return {'backgroundColor': '#D1FAE5', 'color': '#065F46', 'textAlign': 'center'};
-    if (params.value === 'OFF') return {'backgroundColor': '#F3F4F6', 'color': '#9CA3AF', 'textAlign': 'center'};
+    st.subheader("Options Avancées")
+    timeout = st.slider("Temps calcul max (s)", 5, 60, cfg.SOLVER_TIME_LIMIT)
+    cfg.SOLVER_TIME_LIMIT = timeout # Mise à jour dynamique
     
-    // Style par défaut
-    return {'textAlign': 'center'};
-}
-""")
+    buffer_days = st.number_input("Buffer Jours", value=cfg.BUFFER_DAYS)
+    cfg.BUFFER_DAYS = buffer_days
 
-header_style_jscode = JsCode("""
-function(params) {
-    // On pourrait griser l'entête ici si besoin
-}
-""")
+# --- CORPS PRINCIPAL ---
+st.title(f"✈️ Planification ATC - Année {annee_select}")
+st.markdown(f"**Période :** J{jour_debut} à J{jour_fin} | **Contrôleurs :** {len(cfg.CONTROLEURS)}")
 
-# Configuration des colonnes
-gb.configure_column("Agent", pinned="left", width=120, cellStyle={'backgroundColor': '#FFFFFF', 'fontWeight': 'bold'})
-
-# On boucle sur les jours pour appliquer le style et détecter les WE
-jours_semaine = ["LU", "MA", "ME", "JE", "VE", "SA", "DI"] * 3
-for i in range(14):
-    jour_nom = jours_semaine[i]
-    color_bg = '#F9FAFB' # Blanc cassé par défaut
-    if jour_nom in ["SA", "DI"]:
-        color_bg = '#E5E7EB' # Gris pour le WE
+# Bouton d'action
+if st.button("🚀 LANCER L'OPTIMISATION (Moteur V8.8)", type="primary", use_container_width=True):
     
-    gb.configure_column(str(i), 
-                        headerName=f"{jour_nom} {i+1}", 
-                        width=80, 
-                        editable=True, 
-                        cellStyle=cell_style_jscode)
+    with st.spinner("Initialisation du solveur OR-Tools... Intégration des contraintes GAO/LAK..."):
+        # Simulation chargement GSheet (à remplacer par le vrai appel si tu as les secrets)
+        # pre_assignments = load_gsheet(...) 
+        pre_assignments = {} # Vide pour l'instant
+        
+        # Appel du fichier solver.py
+        df_result, status = solver.run_solver(jour_debut, jour_fin, annee_select, pre_assignments)
+        
+        if df_result is not None:
+            st.success(f"Optimisation terminée : {status}")
+            st.session_state['df_planning'] = df_result
+        else:
+            st.error("Impossible de trouver une solution avec ces contraintes (Infaisable).")
 
-gridOptions = gb.build()
+# --- AFFICHAGE RÉSULTAT ---
+if 'df_planning' in st.session_state:
+    df = st.session_state['df_planning']
+    
+    # Préparation AgGrid
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_column("Agent", pinned="left", width=120, cellStyle={'fontWeight': 'bold'})
+    
+    # Javascript pour les couleurs (reprise de ton code)
+    cells_js = JsCode("""
+    function(params) {
+        if (params.value == 'M') return {'backgroundColor': '#ffeebb', 'color': 'black', 'textAlign': 'center', 'fontWeight': 'bold'};
+        if (params.value == 'J1' || params.value == 'J2') return {'backgroundColor': '#d4edda', 'color': 'black', 'textAlign': 'center'};
+        if (params.value == 'A1' || params.value == 'A2') return {'backgroundColor': '#cce5ff', 'color': 'black', 'textAlign': 'center'};
+        if (params.value == 'S') return {'backgroundColor': '#f8d7da', 'color': '#721c24', 'textAlign': 'center', 'fontWeight': 'bold'};
+        if (params.value == 'OFF') return {'backgroundColor': '#f0f2f6', 'color': '#ccc', 'textAlign': 'center'};
+        return {'textAlign': 'center'};
+    }
+    """)
 
-# Affichage
-st.subheader("Grille de Service Mensuelle")
-AgGrid(
-    df,
-    gridOptions=gridOptions,
-    allow_unsafe_jscode=True,
-    theme="alpine", # Plus lisible et aéré que Balham
-    height=500,
-    update_mode=GridUpdateMode.VALUE_CHANGED,
-    reload_data=False
-)
+    # Configurer les colonnes de jours
+    cols_jours = [c for c in df.columns if c != 'Agent']
+    for col in cols_jours:
+        # Essayer de formater la date en entête
+        dt = solver.get_datetime_from_day_num(annee_select, int(col))
+        label = f"{dt.strftime('%d/%m')} (J{col})" if dt else str(col)
+        
+        gb.configure_column(col, headerName=label, width=85, cellStyle=cells_js, editable=True)
 
-st.markdown("""
----
-**Légende :** 🟡 **M** : Matin (05:45) | 🟢 **J/A** : Journée | 🔴 **S** : Soir (jusqu'à 23:30) | ⚪ **OFF** : Repos
-""")
+    gb.configure_grid_options(rowHeight=40)
+    gridOptions = gb.build()
+    
+    st.subheader("Planning Généré")
+    AgGrid(df, gridOptions=gridOptions, allow_unsafe_jscode=True, height=600, theme="alpine")
+    
+    # Export
+    st.download_button("Télécharger en CSV", df.to_csv().encode('utf-8'), "planning_atc.csv")
