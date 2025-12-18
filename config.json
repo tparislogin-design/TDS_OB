@@ -1,0 +1,21 @@
+{
+    "ANNEE": 2025,
+    "CONTROLEURS": ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN", "TRT", "CLO", "FRD", "DAZ", "GNC", "DTY", "JCT", "LNN", "KGR"],
+    "CONTROLLERS_AFFECTES_BUREAU": ["GNC"],
+    "VACATIONS": {
+        "M": {"debut": 5.5, "fin": 14.5},
+        "J1": {"debut": 7.0, "fin": 16.0},
+        "J2": {"debut": 8.5, "fin": 18.0},
+        "J3": {"debut": 8.5, "fin": 18.0},
+        "A1": {"debut": 12.5, "fin": 22.5},
+        "A2": {"debut": 15.0, "fin": 23.5},
+        "S": {"debut": 16.0, "fin": 23.75}
+    },
+    "CONTRAT": {
+        "MIN_REST_HOURS": 11,
+        "MAX_CONSECUTIVE_SHIFTS": 4,
+        "MAX_WEEKEND_SHIFTS": 50,
+        "BUFFER_DAYS": 4,
+        "SOLVER_TIME_LIMIT": 10
+    }
+}
