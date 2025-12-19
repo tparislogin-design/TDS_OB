@@ -2,261 +2,288 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-import math
+from datetime import datetime, timedelta
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 import solver
 
-# --- 1. FONCTIONS UTILITAIRES (CONVERSION HEURES) ---
-def decimal_to_hm(decimal_hour):
-    """Convertit 6.5 en '06:30'"""
-    try:
-        hours = int(decimal_hour)
-        minutes = int(round((decimal_hour - hours) * 60))
-        return f"{hours:02d}:{minutes:02d}"
-    except:
-        return "00:00"
+# --- 1. CONFIGURATION DE LA PAGE ---
+st.set_page_config(page_title="TDS Manager", layout="wide", initial_sidebar_state="collapsed")
 
-def hm_to_decimal(hm_str):
-    """Convertit '06:30' en 6.5"""
-    try:
-        if not hm_str or ":" not in hm_str: return 0.0
-        h, m = map(int, hm_str.split(':'))
-        return h + m / 60.0
-    except:
-        return 0.0
-
-# --- 2. CONFIGURATION DE LA PAGE ---
-st.set_page_config(page_title="TDS Manager Pro", layout="wide", initial_sidebar_state="collapsed")
-
-# CSS "Pixel Perfect" pour un rendu Application Métier
+# --- 2. CSS "PIXEL PERFECT" (Pour imiter ta capture) ---
 st.markdown("""
 <style>
-    /* Structure générale */
-    .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 98% !important;}
-    
-    /* Onglets modernes */
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
-    .stTabs [data-baseweb="tab"] {
-        height: 40px; border-radius: 6px; border: 1px solid #e2e8f0; 
-        background-color: white; color: #64748b; font-weight: 600; font-size: 0.9rem;
+    /* Reset général pour maximiser l'espace */
+    .block-container {
+        padding-top: 0rem;
+        padding-bottom: 0rem;
+        padding-left: 1rem;
+        padding-right: 1rem;
+        max-width: 100% !important;
     }
-    .stTabs [aria-selected="true"] {
-        background-color: #eff6ff; color: #2563eb; border-color: #2563eb;
+    
+    /* Cacher les éléments Streamlit par défaut */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;} /* Cache la barre colorée du haut */
+
+    /* --- STYLE DU HEADER PERSONNALISÉ --- */
+    .custom-header {
+        background-color: #ffffff;
+        border-bottom: 1px solid #e0e0e0;
+        padding: 10px 20px;
+        display: flex;
+        align-items: center;
+        justify_content: space-between;
+        margin-bottom: 15px;
+    }
+    .header-title {
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 1.2rem;
+        font-weight: 700;
+        color: #1f1f1f;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .header-icon {
+        background-color: #2563eb;
+        color: white;
+        padding: 5px 10px;
+        border-radius: 4px;
+        font-weight: bold;
+    }
+    .nav-buttons {
+        display: flex;
+        gap: 5px;
+        background-color: #f3f4f6;
+        padding: 4px;
+        border-radius: 6px;
+    }
+    .nav-btn {
+        background: none;
+        border: none;
+        padding: 6px 15px;
+        font-size: 0.9rem;
+        font-weight: 500;
+        color: #4b5563;
+        cursor: pointer;
+        border-radius: 4px;
+    }
+    .nav-btn.active {
+        background-color: white;
+        color: #2563eb;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        font-weight: 600;
     }
 
-    /* Titres et Textes */
-    h1 { font-family: 'Segoe UI', sans-serif; font-weight: 700; color: #0f172a; font-size: 1.5rem; margin-bottom: 0;}
-    p, label { font-family: 'Segoe UI', sans-serif; font-size: 0.9rem; }
+    /* --- STYLE DES PANNEAUX (DROITE) --- */
+    .right-panel-card {
+        background-color: white;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 15px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .panel-header {
+        font-size: 0.85rem;
+        font-weight: 700;
+        color: #374151;
+        text-transform: uppercase;
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
     
-    /* Tableaux Streamlit natifs (Configuration) */
-    [data-testid="stDataFrame"] { border: 1px solid #e2e8f0; border-radius: 6px; }
+    /* --- BOUTONS STYLISÉS --- */
+    .stButton > button {
+        border-radius: 4px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        border: none;
+    }
+    /* Bouton vert (Import) */
+    div[data-testid="stVerticalBlock"] > div > div > div > div > button {
+         /* Astuce: On cible les boutons génériques, ajustement fin nécessaire selon contexte */
+    }
+
+    /* --- AG GRID HEADERS --- */
+    /* Pour permettre le texte sur plusieurs lignes dans les en-têtes */
+    .ag-header-cell-label .ag-header-cell-text {
+        white-space: pre-wrap !important;
+        text-align: center;
+        font-size: 0.75rem;
+        line-height: 1.1;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. GESTION CONFIGURATION ---
-CONFIG_FILE = "config.json"
+# --- 3. FONCTIONS UTILITAIRES ---
+def get_day_info(year, day_num):
+    """Retourne (NomJour, Date) ex: ('LU', '31/12')"""
+    try:
+        dt = datetime(year, 1, 1) + timedelta(days=day_num - 1)
+        # Jours en français (approximatif pour l'exemple)
+        jours = ["LU", "MA", "ME", "JE", "VE", "SA", "DI"]
+        return jours[dt.weekday()], dt.strftime("%d/%m")
+    except:
+        return "ERR", "00/00"
 
 def load_config():
-    # Config par défaut de sécurité
-    default = {
-        "ANNEE": 2025,
-        "CONTROLEURS": ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN"],
-        "CONTROLLERS_AFFECTES_BUREAU": [],
-        "VACATIONS": {"M": {"debut": 6.0, "fin": 14.0}, "S": {"debut": 15.0, "fin": 23.0}},
-        "CONTRAT": {"MIN_REST_HOURS": 11, "MAX_CONSECUTIVE_SHIFTS": 4, "BUFFER_DAYS": 4, "SOLVER_TIME_LIMIT": 10}
-    }
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f: return json.load(f)
-    return default
+    if os.path.exists("config.json"):
+        with open("config.json", 'r') as f: return json.load(f)
+    return {"ANNEE": 2026, "CONTROLEURS": ["GAO", "WBR"], "CONTRAT": {}}
 
-def save_config(cfg):
-    with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
+# --- 4. HEADER PERSONNALISÉ (HTML) ---
+# On recrée la barre du haut de ta capture
+st.markdown("""
+<div class="custom-header">
+    <div class="header-title">
+        <div class="header-icon">✝</div>
+        TDS Manager <span style="font-size:0.8rem; color:#22c55e; margin-left:5px;">● Fichier: Désidérata</span>
+    </div>
+    <div class="nav-buttons">
+        <button class="nav-btn active">📅 Planning</button>
+        <button class="nav-btn">⚙ Configuration</button>
+        <button class="nav-btn">📋 Désidérata</button>
+        <button class="nav-btn">📊 Bilan</button>
+    </div>
+    <div style="width: 150px;">
+        <!-- Espace réservé pour le bouton Streamlit natif à droite -->
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
+# --- 5. LAYOUT PRINCIPAL (75% Gauche / 25% Droite) ---
+col_main, col_right = st.columns([78, 22], gap="medium")
+
+# Chargement config
 if 'config' not in st.session_state: st.session_state['config'] = load_config()
 config = st.session_state['config']
 
-# --- 4. RENDERER JAVASCRIPT (AG-GRID PRO) ---
-# Optimisé pour une lecture rapide : bordures fines, centrage parfait, couleurs sémantiques
-RENDERER_JS = JsCode("""
-function(params) {
-    if (!params.value) return {'textAlign': 'center', 'backgroundColor': '#fff'};
-
-    // Palette Pro (Pastel Sature)
-    const styles = {
-        'M':  {bg: '#fff7ed', text: '#c2410c', border: '#fed7aa'}, // Orange Matin
-        'J1': {bg: '#f0fdf4', text: '#15803d', border: '#bbf7d0'}, // Vert Jour 1
-        'J2': {bg: '#dcfce7', text: '#166534', border: '#86efac'}, // Vert Jour 2
-        'J3': {bg: '#bbf7d0', text: '#14532d', border: '#4ade80'}, // Vert Jour 3
-        'A1': {bg: '#eff6ff', text: '#1d4ed8', border: '#bfdbfe'}, // Bleu Après-Midi
-        'A2': {bg: '#dbeafe', text: '#1e40af', border: '#93c5fd'}, // Bleu Soir
-        'S':  {bg: '#fef2f2', text: '#b91c1c', border: '#fecaca'}, // Rouge Soirée
-        'OFF':{bg: '#f8fafc', text: '#94a3b8', border: '#e2e8f0'}, // Gris Repos
-        'C':  {bg: '#f1f5f9', text: '#64748b', border: '#e2e8f0'}  // Gris Congés
-    };
-
-    const style = styles[params.value] || {bg: 'white', text: 'black', border: '#eee'};
-
-    return {
-        'backgroundColor': style.bg,
-        'color': style.text,
-        'fontWeight': '600',
-        'textAlign': 'center',
-        'borderRight': '1px solid ' + style.border, 
-        'borderBottom': '1px solid #f1f5f9',
-        'fontSize': '0.9em'
-    };
-}
-""")
-
-# --- 5. INTERFACE ---
-c_titre, c_save = st.columns([6, 1])
-with c_titre: st.title("✈️ TDS Manager Pro")
-
-tab_plan, tab_conf = st.tabs(["📅 PLANNING OPÉRATIONNEL", "⚙️ CONFIGURATION"])
-
 # =========================================================
-# ONGLET 1 : PLANNING
+# COLONNE DE DROITE (PARAMÈTRES & CSV)
 # =========================================================
-with tab_plan:
-    # Barre de contrôle compacte
+with col_right:
+    # --- CARTE 1 : IMPORT CSV ---
     with st.container():
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
-        with c1: annee = st.number_input("Année", value=config["ANNEE"], step=1)
-        with c2: j_start = st.number_input("J. Début", value=335, min_value=1)
-        with c3: j_end = st.number_input("J. Fin", value=348, min_value=1)
-        with c4:
-            st.write("") 
-            if st.button("⚡ LANCER LE CALCUL (OR-TOOLS)", type="primary", use_container_width=True):
-                with st.spinner("Optimisation mathématique en cours..."):
-                    res, stat = solver.run_solver(j_start, j_end, annee, config, {})
-                    if res is not None:
-                        st.session_state['df_planning'] = res
-                        st.toast(f"Calcul réussi : {stat}", icon="✅")
-                    else: st.error("Pas de solution possible.")
-
-    st.write("")
-    
-    # Affichage du tableau AgGrid Optimisé
-    if 'df_planning' in st.session_state:
-        df = st.session_state['df_planning'].copy()
-        df.columns = df.columns.astype(str) # Important pour le JS
+        st.markdown('<div class="right-panel-card">', unsafe_allow_html=True)
+        st.markdown('<div class="panel-header">📗 SOURCE CSV (LECTURE)</div>', unsafe_allow_html=True)
+        st.text_input("URL Google Sheet (Public)", value="https://docs.google.com...", disabled=True, label_visibility="collapsed")
+        st.caption("Nom de la feuille: Désidérata")
         
-        gb = GridOptionsBuilder.from_dataframe(df)
-        
-        # 1. Colonne Agent (Figée)
-        gb.configure_column("Agent", pinned="left", width=95, cellStyle={
-            'fontWeight': '700', 'backgroundColor': '#f8fafc', 'color': '#334155', 
-            'borderRight': '2px solid #e2e8f0', 'display': 'flex', 'alignItems': 'center'
-        })
+        if st.button("📥 Importer Désidérata", use_container_width=True, type="secondary"):
+            st.toast("Données importées !", icon="✅")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        # 2. Colonnes Jours (Dynamiques)
-        cols_jours = [c for c in df.columns if c != 'Agent']
-        for col in cols_jours:
-            header = col
-            is_we = False
-            try:
-                # Formatage intelligent : "Lu 01"
-                d_int = int(col)
-                dt = solver.get_datetime_from_day_num(annee, d_int)
-                if dt:
-                    header = f"{dt.strftime('%a')[:2]}. {dt.day:02d}"
-                    if dt.isoweekday() >= 6: is_we = True
-            except: pass
+    # --- CARTE 2 : PARAMÈTRES GÉNÉRAUX ---
+    with st.container():
+        st.markdown('<div class="right-panel-card">', unsafe_allow_html=True)
+        st.markdown('<div class="panel-header">⚙ PARAMÈTRES GÉNÉRAUX</div>', unsafe_allow_html=True)
+        
+        # Inputs compacts comme sur la capture
+        c_annee = st.number_input("Année", value=config.get("ANNEE", 2026), label_visibility="visible")
+        c1, c2 = st.columns(2)
+        with c1: jd = st.number_input("Jour Début", value=365)
+        with c2: jf = st.number_input("Jour Fin", value=28)
+        
+        st.markdown("---")
+        st.write("**Temps Limite** (s) : **25**")
+        st.slider("Temps", 5, 60, 25, label_visibility="collapsed")
+        
+        st.number_input("Max Heures (7j glissants)", value=44)
+        st.number_input("Repos Min", value=11)
+        st.number_input("Max Consécutifs", value=4)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+    # Bouton Lancer Optimisation (Bleu, en haut à droite normalement, ici en bas de colonne pour l'exemple)
+    st.button("⚡ Lancer Optimisation", type="primary", use_container_width=True)
+
+# =========================================================
+# COLONNE PRINCIPALE (GRILLE PLANNING)
+# =========================================================
+with col_main:
+    # --- BARRE D'OUTILS ---
+    tb_col1, tb_col2, tb_col3, tb_col4 = st.columns([2, 2, 4, 2])
+    with tb_col1:
+        st.button("👁 Voir Sources", use_container_width=True)
+    with tb_col2:
+        st.button("⚠ Voir Violations", use_container_width=True)
+    with tb_col3:
+        # Contrôle du Zoom (Fake slider visuel)
+        st.slider("Zoom", 50, 150, 100, label_visibility="collapsed")
+    with tb_col4:
+        st.button("⬇ Export Excel", use_container_width=True)
+
+    # --- PRÉPARATION DES DONNÉES DE LA GRILLE ---
+    # Génération d'un DataFrame vide qui ressemble à ta capture
+    if 'df_planning' not in st.session_state:
+        agents = config["CONTROLEURS"]
+        # Création des colonnes pour la période (Exemple capture: 365 -> 26)
+        # Simplification : On génère 15 jours
+        cols = []
+        headers_def = {}
+        
+        # Logique pour créer les en-têtes sur 3 lignes (Jour, Numéro, Date)
+        start_day = 365
+        year = config.get("ANNEE", 2026)
+        
+        days_to_show = []
+        # Fin d'année 2025
+        days_to_show.append((year-1, 365))
+        # Début année 2026
+        for i in range(1, 16): days_to_show.append((year, i))
             
-            gb.configure_column(
-                col,
-                headerName=header,
-                width=62, # Largeur idéale pour "Code Vacation"
-                cellStyle=RENDERER_JS,
-                editable=True,
-                cellClass="weekend-col" if is_we else "" # Classe CSS pour le WE (optionnelle)
-            )
+        for y, d in days_to_show:
+            nom_jour, date_jour = get_day_info(y, d)
+            col_id = f"{d}" # ID unique
+            # Formatage spécial pour le header AgGrid: "LU\n365\n31/12"
+            header_label = f"{nom_jour}\n{d}\n{date_jour}"
+            cols.append(col_id)
+            headers_def[col_id] = header_label
 
-        # 3. Options Globales
-        gb.configure_grid_options(
-            rowHeight=35, 
-            headerHeight=38,
-            suppressMovableColumns=True,
-            enableCellChangeFlash=True
-        )
+        # Création du DF
+        data = []
+        for agent in agents:
+            row = {"Agent": f"{agent}\n0 / 12"} # Ajout des stats sous le nom
+            for c in cols:
+                row[c] = "" # Vide par défaut
+            data.append(row)
         
-        AgGrid(df, gridOptions=gb.build(), allow_unsafe_jscode=True, height=550, theme="balham", width='100%')
-    else:
-        st.info("👋 Cliquez sur 'LANCER LE CALCUL' pour générer le planning.")
+        st.session_state['df_planning'] = pd.DataFrame(data)
+        st.session_state['headers_def'] = headers_def
 
-# =========================================================
-# ONGLET 2 : CONFIGURATION (AVEC HEURES LISIBLES)
-# =========================================================
-with tab_conf:
-    col_l, col_r = st.columns([1, 2], gap="large")
+    df = st.session_state['df_planning']
+    headers_mapping = st.session_state['headers_def']
 
-    # --- Section Agents ---
-    with col_l:
-        st.subheader("👥 Contrôleurs")
-        st.caption("Liste des indicatifs (un par ligne)")
-        agents_text = st.text_area("Agents", value="\n".join(config["CONTROLEURS"]), height=300, label_visibility="collapsed")
+    # --- CONFIGURATION AG-GRID ---
+    gb = GridOptionsBuilder.from_dataframe(df)
+    
+    # 1. Colonne Agent (Style spécifique avec saut de ligne)
+    gb.configure_column("Agent", pinned="left", width=80, cellStyle={
+        'fontWeight': 'bold', 
+        'backgroundColor': '#f8fafc', 
+        'whiteSpace': 'pre-wrap', # Permet le saut de ligne pour "GAO \n 0/12"
+        'fontSize': '0.8rem',
+        'lineHeight': '1.2',
+        'display': 'flex',
+        'alignItems': 'center'
+    })
 
-    # --- Section Paramètres & Vacations ---
-    with col_r:
-        st.subheader("⚙️ Paramètres")
-        cc1, cc2, cc3 = st.columns(3)
-        with cc1: mc = st.number_input("Max Consécutifs", value=config["CONTRAT"]["MAX_CONSECUTIVE_SHIFTS"])
-        with cc2: mr = st.number_input("Repos Min (h)", value=config["CONTRAT"]["MIN_REST_HOURS"])
-        with cc3: tm = st.number_input("Timeout (s)", value=config["CONTRAT"]["SOLVER_TIME_LIMIT"])
-        
-        st.divider()
-        st.subheader("🕒 Horaires des Vacations")
-        st.caption("Modifiez les heures au format HH:MM (ex: 06:30)")
-
-        # --- CONVERSION DYNAMIQUE POUR L'AFFICHAGE ---
-        # 1. On transforme le JSON (decimal) en DataFrame (HH:MM)
-        vacs_list = []
-        for code, times in config["VACATIONS"].items():
-            vacs_list.append({
-                "Code": code,
-                "Début": decimal_to_hm(times["debut"]), # 6.5 -> "06:30"
-                "Fin": decimal_to_hm(times["fin"])      # 14.0 -> "14:00"
-            })
-        df_vacs_display = pd.DataFrame(vacs_list)
-
-        # 2. Éditeur Interactif
-        edited_df = st.data_editor(
-            df_vacs_display, 
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "Code": st.column_config.TextColumn("Code", width="small", disabled=False),
-                "Début": st.column_config.TextColumn("Début (HH:MM)", width="medium", validate="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$"),
-                "Fin": st.column_config.TextColumn("Fin (HH:MM)", width="medium", validate="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
-            },
-            hide_index=True
-        )
-
-    # --- BOUTON SAUVEGARDE ---
-    st.write("---")
-    if st.button("💾 ENREGISTRER TOUS LES CHANGEMENTS", type="primary"):
-        # 1. Agents
-        new_agents = [x.strip() for x in agents_text.split('\n') if x.strip()]
-        
-        # 2. Vacations (Reconversion HH:MM -> Decimal)
-        new_vacs = {}
-        for idx, row in edited_df.iterrows():
-            if row["Code"]:
-                new_vacs[row["Code"]] = {
-                    "debut": hm_to_decimal(row["Début"]), # "06:30" -> 6.5
-                    "fin": hm_to_decimal(row["Fin"])
-                }
-        
-        # 3. Construction Config
-        new_conf = config.copy()
-        new_conf["CONTROLEURS"] = new_agents
-        new_conf["VACATIONS"] = new_vacs
-        new_conf["CONTRAT"]["MAX_CONSECUTIVE_SHIFTS"] = mc
-        new_conf["CONTRAT"]["MIN_REST_HOURS"] = mr
-        new_conf["CONTRAT"]["SOLVER_TIME_LIMIT"] = tm
-        
-        # 4. Save
-        st.session_state['config'] = new_conf
-        save_config(new_conf)
-        st.toast("Configuration sauvegardée avec succès !", icon="✅")
-        st.rerun()
+    # 2. Colonnes Jours
+    # Rendu JS conditionnel (Couleurs)
+    js_renderer = JsCode("""
+    function(params) {
+        if (!params.value) return {'textAlign': 'center', 'borderRight': '1px solid #eee'};
+        const colors = {
+            'M': '#fff7ed', 'J1': '#f0fdf4', 'J2': '#dcfce7', 
+            'J3': '#bbf7d0', 'A1': '#eff6ff', 'A2': '#dbeafe', 'S': '#fef2f2'
+        };
+        const txtColors = {
+            'M': '#c2410c', 'J1': '#15803d', 'J2': '#166534', 
+            'J3': '#14532d', 'A1': '#1d4ed8', 'A2': '#1e40af', 'S': '#b91c1c'
+        };
+        return {
+            'backgroundColor': col
