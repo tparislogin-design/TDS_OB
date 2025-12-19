@@ -2,229 +2,261 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+import math
+from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 import solver
 
-# --- 1. CONFIGURATION DE LA PAGE (Look "Application Web") ---
-st.set_page_config(page_title="TDS Manager", layout="wide", initial_sidebar_state="collapsed")
+# --- 1. FONCTIONS UTILITAIRES (CONVERSION HEURES) ---
+def decimal_to_hm(decimal_hour):
+    """Convertit 6.5 en '06:30'"""
+    try:
+        hours = int(decimal_hour)
+        minutes = int(round((decimal_hour - hours) * 60))
+        return f"{hours:02d}:{minutes:02d}"
+    except:
+        return "00:00"
 
-# Injecter du CSS pour masquer le style "Streamlit" par défaut et faire "App Pro"
+def hm_to_decimal(hm_str):
+    """Convertit '06:30' en 6.5"""
+    try:
+        if not hm_str or ":" not in hm_str: return 0.0
+        h, m = map(int, hm_str.split(':'))
+        return h + m / 60.0
+    except:
+        return 0.0
+
+# --- 2. CONFIGURATION DE LA PAGE ---
+st.set_page_config(page_title="TDS Manager Pro", layout="wide", initial_sidebar_state="collapsed")
+
+# CSS "Pixel Perfect" pour un rendu Application Métier
 st.markdown("""
 <style>
-    /* Supprimer les marges énormes de Streamlit */
-    .block-container {padding-top: 1rem; padding-bottom: 1rem; max-width: 98% !important;}
+    /* Structure générale */
+    .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 98% !important;}
     
-    /* Cacher le menu hamburger et le footer pour un look "SaaS" */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* Style des onglets */
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    /* Onglets modernes */
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
     .stTabs [data-baseweb="tab"] {
-        height: 45px; white-space: pre-wrap; background-color: #f1f5f9; border-radius: 6px;
-        color: #475569; font-weight: 600; font-size: 0.9rem;
+        height: 40px; border-radius: 6px; border: 1px solid #e2e8f0; 
+        background-color: white; color: #64748b; font-weight: 600; font-size: 0.9rem;
     }
-    .stTabs [aria-selected="true"] { background-color: #ffffff; color: #2563eb; border-top: 3px solid #2563eb; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);}
+    .stTabs [aria-selected="true"] {
+        background-color: #eff6ff; color: #2563eb; border-color: #2563eb;
+    }
+
+    /* Titres et Textes */
+    h1 { font-family: 'Segoe UI', sans-serif; font-weight: 700; color: #0f172a; font-size: 1.5rem; margin-bottom: 0;}
+    p, label { font-family: 'Segoe UI', sans-serif; font-size: 0.9rem; }
     
-    /* Titres */
-    h1 { font-family: 'Inter', sans-serif; font-weight: 700; color: #0f172a; font-size: 1.8rem; }
-    
-    /* Boutons */
-    div.stButton > button { border-radius: 6px; font-weight: 600; }
+    /* Tableaux Streamlit natifs (Configuration) */
+    [data-testid="stDataFrame"] { border: 1px solid #e2e8f0; border-radius: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. GESTION DE LA CONFIGURATION (JSON) ---
+# --- 3. GESTION CONFIGURATION ---
 CONFIG_FILE = "config.json"
 
 def load_config():
-    # Configuration par défaut si le fichier n'existe pas
-    default_config = {
+    # Config par défaut de sécurité
+    default = {
         "ANNEE": 2025,
         "CONTROLEURS": ["GAO", "WBR", "PLC", "CML", "BBD", "LAK", "MZN"],
         "CONTROLLERS_AFFECTES_BUREAU": [],
         "VACATIONS": {"M": {"debut": 6.0, "fin": 14.0}, "S": {"debut": 15.0, "fin": 23.0}},
         "CONTRAT": {"MIN_REST_HOURS": 11, "MAX_CONSECUTIVE_SHIFTS": 4, "BUFFER_DAYS": 4, "SOLVER_TIME_LIMIT": 10}
     }
-    if not os.path.exists(CONFIG_FILE):
-        return default_config
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return default_config
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f: return json.load(f)
+    return default
 
-def save_config(config_data):
-    # Note: Sur Streamlit Cloud, ceci ne persiste pas après reboot
-    # Mais c'est suffisant pour la session active.
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config_data, f, indent=4)
+def save_config(cfg):
+    with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
 
-if 'config' not in st.session_state:
-    st.session_state['config'] = load_config()
-
+if 'config' not in st.session_state: st.session_state['config'] = load_config()
 config = st.session_state['config']
 
-# --- 3. JAVASCRIPT PUR (Pour le Rendu Frontend) ---
-# C'est ici que tu obtiens ton rendu "React" fluide.
-# Ce code est exécuté par le navigateur, pas par Python.
+# --- 4. RENDERER JAVASCRIPT (AG-GRID PRO) ---
+# Optimisé pour une lecture rapide : bordures fines, centrage parfait, couleurs sémantiques
 RENDERER_JS = JsCode("""
 function(params) {
-    if (!params.value) return {'textAlign': 'center'};
+    if (!params.value) return {'textAlign': 'center', 'backgroundColor': '#fff'};
 
-    // Palette de couleurs "Modern UI"
-    const colors = {
-        'M':  {bg: '#fff7ed', text: '#9a3412', border: '#ffedd5'}, // Orange
-        'J1': {bg: '#f0fdf4', text: '#166534', border: '#dcfce7'}, // Vert
-        'J2': {bg: '#dcfce7', text: '#14532d', border: '#bbf7d0'}, // Vert Foncé
-        'J3': {bg: '#bbf7d0', text: '#052e16', border: '#86efac'}, // Vert Arbre
-        'A1': {bg: '#eff6ff', text: '#1e40af', border: '#dbeafe'}, // Bleu
-        'A2': {bg: '#dbeafe', text: '#1e3a8a', border: '#bfdbfe'}, // Bleu Roi
-        'S':  {bg: '#fef2f2', text: '#991b1b', border: '#fee2e2'}, // Rouge
-        'OFF':{bg: '#f8fafc', text: '#94a3b8', border: '#e2e8f0'}, // Gris
-        'C':  {bg: '#f1f5f9', text: '#64748b', border: '#e2e8f0'}  // Gris Foncé
+    // Palette Pro (Pastel Sature)
+    const styles = {
+        'M':  {bg: '#fff7ed', text: '#c2410c', border: '#fed7aa'}, // Orange Matin
+        'J1': {bg: '#f0fdf4', text: '#15803d', border: '#bbf7d0'}, // Vert Jour 1
+        'J2': {bg: '#dcfce7', text: '#166534', border: '#86efac'}, // Vert Jour 2
+        'J3': {bg: '#bbf7d0', text: '#14532d', border: '#4ade80'}, // Vert Jour 3
+        'A1': {bg: '#eff6ff', text: '#1d4ed8', border: '#bfdbfe'}, // Bleu Après-Midi
+        'A2': {bg: '#dbeafe', text: '#1e40af', border: '#93c5fd'}, // Bleu Soir
+        'S':  {bg: '#fef2f2', text: '#b91c1c', border: '#fecaca'}, // Rouge Soirée
+        'OFF':{bg: '#f8fafc', text: '#94a3b8', border: '#e2e8f0'}, // Gris Repos
+        'C':  {bg: '#f1f5f9', text: '#64748b', border: '#e2e8f0'}  // Gris Congés
     };
 
-    const style = colors[params.value] || {bg: 'white', text: 'black', border: '#eee'};
+    const style = styles[params.value] || {bg: 'white', text: 'black', border: '#eee'};
 
     return {
         'backgroundColor': style.bg,
         'color': style.text,
-        'fontWeight': 'bold',
+        'fontWeight': '600',
         'textAlign': 'center',
-        'borderRight': '1px solid ' + style.border, // Séparateur vertical subtil
-        'borderRadius': '0px' // Look Excel
+        'borderRight': '1px solid ' + style.border, 
+        'borderBottom': '1px solid #f1f5f9',
+        'fontSize': '0.9em'
     };
 }
 """)
 
-# --- 4. INTERFACE UTILISATEUR ---
+# --- 5. INTERFACE ---
+c_titre, c_save = st.columns([6, 1])
+with c_titre: st.title("✈️ TDS Manager Pro")
 
-st.title("✈️ TDS Manager")
-
-# Onglets principaux
-tab_planning, tab_config = st.tabs(["📅 PLANNING & OPÉRATIONS", "⚙️ CONFIGURATION & RÈGLES"])
+tab_plan, tab_conf = st.tabs(["📅 PLANNING OPÉRATIONNEL", "⚙️ CONFIGURATION"])
 
 # =========================================================
-# ONGLET 1 : LE PLANNING (Moteur + Visuel JS)
+# ONGLET 1 : PLANNING
 # =========================================================
-with tab_planning:
-    # Barre d'outils compacte
-    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 2])
-    with col1: annee = st.number_input("Année", value=config["ANNEE"], label_visibility="collapsed")
-    with col2: j_debut = st.number_input("J. Début", value=335, label_visibility="collapsed")
-    with col3: j_fin = st.number_input("J. Fin", value=348, label_visibility="collapsed")
-    with col4: st.write("") # Spacer
-    with col5:
-        if st.button("⚡ CALCULER LE PLANNING", type="primary", use_container_width=True):
-            with st.spinner("Optimisation en cours (OR-Tools)..."):
-                # Simulation données externes (vide pour l'instant)
-                res, status = solver.run_solver(j_debut, j_fin, annee, config, {})
-                if res is not None:
-                    st.toast(f"Calcul terminé : {status}", icon="✅")
-                    st.session_state['df_planning'] = res
-                else:
-                    st.error("Aucune solution trouvée.")
+with tab_plan:
+    # Barre de contrôle compacte
+    with st.container():
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
+        with c1: annee = st.number_input("Année", value=config["ANNEE"], step=1)
+        with c2: j_start = st.number_input("J. Début", value=335, min_value=1)
+        with c3: j_end = st.number_input("J. Fin", value=348, min_value=1)
+        with c4:
+            st.write("") 
+            if st.button("⚡ LANCER LE CALCUL (OR-TOOLS)", type="primary", use_container_width=True):
+                with st.spinner("Optimisation mathématique en cours..."):
+                    res, stat = solver.run_solver(j_start, j_end, annee, config, {})
+                    if res is not None:
+                        st.session_state['df_planning'] = res
+                        st.toast(f"Calcul réussi : {stat}", icon="✅")
+                    else: st.error("Pas de solution possible.")
 
-    st.divider()
-
-    # Affichage Grille "Pixel Perfect"
+    st.write("")
+    
+    # Affichage du tableau AgGrid Optimisé
     if 'df_planning' in st.session_state:
         df = st.session_state['df_planning'].copy()
+        df.columns = df.columns.astype(str) # Important pour le JS
         
-        # ⚠️ CRITIQUE : Conversion des noms de colonnes en String pour le JS
-        df.columns = df.columns.astype(str)
-
-        # Construction de la grille
         gb = GridOptionsBuilder.from_dataframe(df)
         
-        # Colonne Agent figée
-        gb.configure_column("Agent", pinned="left", width=90, cellStyle={'fontWeight': 'bold', 'backgroundColor': '#ffffff', 'color': '#334155', 'borderRight': '2px solid #e2e8f0'})
+        # 1. Colonne Agent (Figée)
+        gb.configure_column("Agent", pinned="left", width=95, cellStyle={
+            'fontWeight': '700', 'backgroundColor': '#f8fafc', 'color': '#334155', 
+            'borderRight': '2px solid #e2e8f0', 'display': 'flex', 'alignItems': 'center'
+        })
 
-        # Colonnes Jours (Boucle dynamique)
+        # 2. Colonnes Jours (Dynamiques)
         cols_jours = [c for c in df.columns if c != 'Agent']
         for col in cols_jours:
-            # Formatage intelligent de l'en-tête (ex: "Lu 01")
-            header_name = col
+            header = col
             is_we = False
             try:
-                d_num = int(col)
-                dt = solver.get_datetime_from_day_num(annee, d_num)
+                # Formatage intelligent : "Lu 01"
+                d_int = int(col)
+                dt = solver.get_datetime_from_day_num(annee, d_int)
                 if dt:
-                    header_name = f"{dt.strftime('%a')[:2]}. {dt.day:02d}"
+                    header = f"{dt.strftime('%a')[:2]}. {dt.day:02d}"
                     if dt.isoweekday() >= 6: is_we = True
             except: pass
-
+            
             gb.configure_column(
                 col,
-                headerName=header_name,
-                width=60,
-                cellStyle=RENDERER_JS, # Application du JS ici
+                headerName=header,
+                width=62, # Largeur idéale pour "Code Vacation"
+                cellStyle=RENDERER_JS,
                 editable=True,
-                cellClass="weekend-col" if is_we else ""
+                cellClass="weekend-col" if is_we else "" # Classe CSS pour le WE (optionnelle)
             )
 
-        # Options Globales Grid
+        # 3. Options Globales
         gb.configure_grid_options(
-            rowHeight=32, # Très compact
-            headerHeight=35,
+            rowHeight=35, 
+            headerHeight=38,
             suppressMovableColumns=True,
-            enableCellChangeFlash=True # Petit flash quand on édite
+            enableCellChangeFlash=True
         )
-
-        gridOptions = gb.build()
-
-        AgGrid(
-            df,
-            gridOptions=gridOptions,
-            allow_unsafe_jscode=True, # Indispensable pour notre JS
-            height=600,
-            theme="balham", # Thème Pro compact
-            width='100%'
-        )
+        
+        AgGrid(df, gridOptions=gb.build(), allow_unsafe_jscode=True, height=550, theme="balham", width='100%')
     else:
-        st.info("👋 Cliquez sur 'CALCULER' pour générer une première grille.")
+        st.info("👋 Cliquez sur 'LANCER LE CALCUL' pour générer le planning.")
 
 # =========================================================
-# ONGLET 2 : CONFIGURATION (Low Code)
+# ONGLET 2 : CONFIGURATION (AVEC HEURES LISIBLES)
 # =========================================================
-with tab_config:
-    c_left, c_right = st.columns([1, 2])
-    
-    with c_left:
-        st.subheader("👥 Agents")
-        agents_txt = st.text_area("Liste (1/ligne)", value="\n".join(config["CONTROLEURS"]), height=250)
-        
-    with c_right:
-        st.subheader("⚙️ Paramètres & Vacations")
-        
-        # Paramètres Contrat
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            max_cons = st.number_input("Max Consécutifs", value=config["CONTRAT"]["MAX_CONSECUTIVE_SHIFTS"])
-        with cc2:
-            min_rest = st.number_input("Repos Min (h)", value=config["CONTRAT"]["MIN_REST_HOURS"])
-            
-        # Éditeur de Vacations
-        vacs_list = [{"Code": k, "Début": v["debut"], "Fin": v["fin"]} for k,v in config["VACATIONS"].items()]
-        df_vacs = pd.DataFrame(vacs_list)
-        edited_vacs = st.data_editor(df_vacs, num_rows="dynamic", use_container_width=True)
+with tab_conf:
+    col_l, col_r = st.columns([1, 2], gap="large")
 
+    # --- Section Agents ---
+    with col_l:
+        st.subheader("👥 Contrôleurs")
+        st.caption("Liste des indicatifs (un par ligne)")
+        agents_text = st.text_area("Agents", value="\n".join(config["CONTROLEURS"]), height=300, label_visibility="collapsed")
+
+    # --- Section Paramètres & Vacations ---
+    with col_r:
+        st.subheader("⚙️ Paramètres")
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1: mc = st.number_input("Max Consécutifs", value=config["CONTRAT"]["MAX_CONSECUTIVE_SHIFTS"])
+        with cc2: mr = st.number_input("Repos Min (h)", value=config["CONTRAT"]["MIN_REST_HOURS"])
+        with cc3: tm = st.number_input("Timeout (s)", value=config["CONTRAT"]["SOLVER_TIME_LIMIT"])
+        
+        st.divider()
+        st.subheader("🕒 Horaires des Vacations")
+        st.caption("Modifiez les heures au format HH:MM (ex: 06:30)")
+
+        # --- CONVERSION DYNAMIQUE POUR L'AFFICHAGE ---
+        # 1. On transforme le JSON (decimal) en DataFrame (HH:MM)
+        vacs_list = []
+        for code, times in config["VACATIONS"].items():
+            vacs_list.append({
+                "Code": code,
+                "Début": decimal_to_hm(times["debut"]), # 6.5 -> "06:30"
+                "Fin": decimal_to_hm(times["fin"])      # 14.0 -> "14:00"
+            })
+        df_vacs_display = pd.DataFrame(vacs_list)
+
+        # 2. Éditeur Interactif
+        edited_df = st.data_editor(
+            df_vacs_display, 
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "Code": st.column_config.TextColumn("Code", width="small", disabled=False),
+                "Début": st.column_config.TextColumn("Début (HH:MM)", width="medium", validate="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$"),
+                "Fin": st.column_config.TextColumn("Fin (HH:MM)", width="medium", validate="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
+            },
+            hide_index=True
+        )
+
+    # --- BOUTON SAUVEGARDE ---
     st.write("---")
-    if st.button("💾 SAUVEGARDER CONFIGURATION", type="secondary"):
-        # Reconstitution de l'objet Config
-        new_conf = config.copy()
-        new_conf["CONTROLEURS"] = [x.strip() for x in agents_txt.split('\n') if x.strip()]
-        new_conf["CONTRAT"]["MAX_CONSECUTIVE_SHIFTS"] = max_cons
-        new_conf["CONTRAT"]["MIN_REST_HOURS"] = min_rest
+    if st.button("💾 ENREGISTRER TOUS LES CHANGEMENTS", type="primary"):
+        # 1. Agents
+        new_agents = [x.strip() for x in agents_text.split('\n') if x.strip()]
         
-        new_vacs_dict = {}
-        for _, row in edited_vacs.iterrows():
+        # 2. Vacations (Reconversion HH:MM -> Decimal)
+        new_vacs = {}
+        for idx, row in edited_df.iterrows():
             if row["Code"]:
-                new_vacs_dict[row["Code"]] = {"debut": row["Début"], "fin": row["Fin"]}
-        new_conf["VACATIONS"] = new_vacs_dict
+                new_vacs[row["Code"]] = {
+                    "debut": hm_to_decimal(row["Début"]), # "06:30" -> 6.5
+                    "fin": hm_to_decimal(row["Fin"])
+                }
         
+        # 3. Construction Config
+        new_conf = config.copy()
+        new_conf["CONTROLEURS"] = new_agents
+        new_conf["VACATIONS"] = new_vacs
+        new_conf["CONTRAT"]["MAX_CONSECUTIVE_SHIFTS"] = mc
+        new_conf["CONTRAT"]["MIN_REST_HOURS"] = mr
+        new_conf["CONTRAT"]["SOLVER_TIME_LIMIT"] = tm
+        
+        # 4. Save
         st.session_state['config'] = new_conf
-        save_config(new_conf) # Sauvegarde locale (temporaire sur Cloud)
-        st.toast("Configuration mise à jour !", icon="💾")
+        save_config(new_conf)
+        st.toast("Configuration sauvegardée avec succès !", icon="✅")
         st.rerun()
